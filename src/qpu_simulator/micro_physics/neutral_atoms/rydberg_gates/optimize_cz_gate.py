@@ -643,6 +643,67 @@ def _get_smooth_jp_bounds_and_x0() -> Tuple[list, np.ndarray]:
     return bounds, x0
 
 
+def warm_start_bounds(
+    opt_result: "OptimizationResult",
+    frac: float = 0.20,
+    original_bounds: Optional[list] = None,
+) -> Tuple[list, np.ndarray]:
+    """
+    Build tight bounds around a previous optimisation result for warm-starting.
+    
+    For each parameter, bounds are set to [value*(1-frac), value*(1+frac)],
+    clamped to the original bounds if provided. Phase parameters (phi*) use
+    additive ±frac*π instead of fractional since they can be near zero.
+    Fraction parameters (frac*) are clamped to [0.01, 0.99].
+    
+    Parameters
+    ----------
+    opt_result : OptimizationResult
+        Previous result whose best_params and param_names are used.
+    frac : float
+        Fractional width of the bounds window (default 0.20 = ±20%).
+    original_bounds : list of (lo, hi), optional
+        Original parameter bounds to clamp against.
+        
+    Returns
+    -------
+    bounds : list of (lo, hi)
+        Tight bounds for each parameter.
+    x0 : np.ndarray
+        The previous optimum (for seeding DE).
+    """
+    x0 = opt_result.best_params.copy()
+    bounds = []
+    phase_delta = frac * np.pi  # additive window for phase params
+    
+    for i, (name, val) in enumerate(zip(opt_result.param_names, x0)):
+        if "phi" in name:
+            # Phase: additive ±frac*π
+            lo, hi = val - phase_delta, val + phase_delta
+        elif "frac" in name:
+            # Fraction: ±frac, clamped to [0.01, 0.99]
+            lo = max(0.01, val - frac)
+            hi = min(0.99, val + frac)
+        else:
+            # Standard: multiplicative ±frac
+            delta = max(abs(val) * frac, 0.01)
+            lo, hi = val - delta, val + delta
+        
+        # Clamp to original bounds if provided
+        if original_bounds is not None and i < len(original_bounds):
+            orig_lo, orig_hi = original_bounds[i]
+            lo = max(lo, orig_lo)
+            hi = min(hi, orig_hi)
+        
+        # Ensure lo < hi
+        if lo >= hi:
+            lo = hi - 0.01
+        
+        bounds.append((lo, hi))
+    
+    return bounds, x0
+
+
 # =============================================================================
 # OPTIMISATION RESULT
 # =============================================================================
@@ -739,6 +800,7 @@ def optimize_cz_gate(
     cache: Optional[SimulationCache] = None,
     cache_path: Optional[str] = None,
     strategy: str = "standard",
+    variant: Optional[str] = None,
     verbose: bool = True,
 ) -> OptimizationResult:
     """
@@ -789,6 +851,10 @@ def optimize_cz_gate(
         Optimization strategy: "standard" (default) or "two_phase".
         Two-phase first optimizes omega_tau alone, then fine-tunes all
         parameters.  Most useful for smooth_jp in unfamiliar V/Ω regimes.
+    variant : str, optional
+        For bang-bang, force a specific variant: "5-segment" or "7-segment".
+        If None (default), tries both and picks the best.
+        Ignored for LP and smooth JP protocols.
     verbose : bool
         Print progress.
     
@@ -834,8 +900,16 @@ def optimize_cz_gate(
     
     # Determine discrete variants
     if is_jp_bangbang:
-        # Try both 5-segment and 7-segment parameterisations
-        variants = {"5-segment": 5, "7-segment": 7}
+        if variant is not None:
+            # User forced a specific variant
+            _allowed = {"5-segment": 5, "7-segment": 7}
+            if variant not in _allowed:
+                raise ValueError(
+                    f"Unknown variant '{variant}'. Use '5-segment' or '7-segment'.")
+            variants = {variant: _allowed[variant]}
+        else:
+            # Try both 5-segment and 7-segment parameterisations
+            variants = {"5-segment": 5, "7-segment": 7}
     else:
         # LP and smooth JP have a single "default" variant
         variants = {"default": None}
